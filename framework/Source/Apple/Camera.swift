@@ -87,6 +87,64 @@ public class Camera: NSObject, ImageSource, AVCaptureVideoDataOutputSampleBuffer
     var framesSinceLastCheck = 0
     var lastCheckTime = CFAbsoluteTimeGetCurrent()
 
+	public init(captureSession: AVCaptureSession, orientation: ImageOrientation? = nil, captureAsYUV: Bool = true) throws {
+		self.location = .frontFacing
+		self.orientation = orientation
+		self.captureAsYUV = captureAsYUV
+		self.captureSession = captureSession
+		self.inputCamera = (captureSession.inputs.first as? AVCaptureDeviceInput)?.device
+		self.videoInput  = captureSession.inputs.first as? AVCaptureDeviceInput
+		
+		// Add the video frame output
+        videoOutput = AVCaptureVideoDataOutput()
+        videoOutput.alwaysDiscardsLateVideoFrames = false
+
+        if captureAsYUV {
+            supportsFullYUVRange = false
+            let supportedPixelFormats = videoOutput.availableVideoPixelFormatTypes
+            for currentPixelFormat in supportedPixelFormats {
+                if ((currentPixelFormat as NSNumber).int32Value == Int32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)) {
+                    supportsFullYUVRange = true
+                }
+            }
+            
+            if (supportsFullYUVRange) {
+                yuvConversionShader = crashOnShaderCompileFailure("Camera"){try sharedImageProcessingContext.programForVertexShader(defaultVertexShaderForInputs(2), fragmentShader:YUVConversionFullRangeFragmentShader)}
+                videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String:NSNumber(value:Int32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))]
+            } else {
+                yuvConversionShader = crashOnShaderCompileFailure("Camera"){try sharedImageProcessingContext.programForVertexShader(defaultVertexShaderForInputs(2), fragmentShader:YUVConversionVideoRangeFragmentShader)}
+                videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String:NSNumber(value:Int32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange))]
+            }
+        } else {
+            yuvConversionShader = nil
+            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String:NSNumber(value:Int32(kCVPixelFormatType_32BGRA))]
+        }
+
+        if (captureSession.canAddOutput(videoOutput)) {
+            captureSession.addOutput(videoOutput)
+        }
+		captureSession.sessionPreset = .photo
+
+        var captureConnection: AVCaptureConnection!
+        for connection in videoOutput.connections {
+            for port in connection.inputPorts {
+                if port.mediaType == AVMediaType.video {
+                    captureConnection = connection
+                    captureConnection.isVideoMirrored = location == .frontFacing
+                }
+            }
+        }
+
+        if captureConnection.isVideoOrientationSupported {
+            captureConnection.videoOrientation = .portrait
+        }
+        captureSession.commitConfiguration()
+
+        super.init()
+        
+        videoOutput.setSampleBufferDelegate(self, queue:cameraProcessingQueue)
+	}
+	
     public init(sessionPreset:AVCaptureSession.Preset, cameraDevice:AVCaptureDevice? = nil, location:PhysicalCameraLocation = .backFacing, orientation:ImageOrientation? = nil, captureAsYUV:Bool = true) throws {
         self.location = location
         self.orientation = orientation
